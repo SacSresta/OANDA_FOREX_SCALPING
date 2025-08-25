@@ -1,9 +1,9 @@
 [project]
-name = "oanda-forex-scalping"
+name = "python-template"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.12"
+description = ""
+authors = ["Your Name <you@example.com>"]
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.3.2",
     'oandapyV20',
