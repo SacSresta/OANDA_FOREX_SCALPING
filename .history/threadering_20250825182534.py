@@ -3,13 +3,14 @@ import time
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
+
+np.NaN = np.nan
+import pandas_ta as ta
 from oandapyV20 import API
 from oandapyV20.endpoints import instruments, orders
 import warnings
 from dotenv import load_dotenv
 import traceback
-from strategies.vwap_rsi_scalping import strategy  # Your custom strategy function
-import threading
 
 # -----------------------------
 # 0️⃣ Setup
@@ -62,15 +63,19 @@ def format_price(price, instrument):
         return str(round(price, 5))
 
 
-def place_order(units: int, side: str, sl_price: float, tp_price: float, symbol: str):
+def place_order(units: int, side: str, sl: float, tp: float, symbol: str):
     data = {
         "order": {
             "instrument": symbol,
             "units": str(units if side == "buy" else -units),
             "type": "MARKET",
             "positionFill": "DEFAULT",
-            "stopLossOnFill": {"price": format_price(sl_price, symbol)},
-            "takeProfitOnFill": {"price": format_price(tp_price, symbol)}
+            "stopLossOnFill": {
+                "price": format_price(sl, symbol)
+            },
+            "takeProfitOnFill": {
+                "price": format_price(tp, symbol)
+            }
         }
     }
     r = orders.OrderCreate(accountID=account_id, data=data)
@@ -84,64 +89,79 @@ def place_order(units: int, side: str, sl_price: float, tp_price: float, symbol:
 def run_symbol(symbol):
     backcandles = 15
     units = 1000
-    ATR_multiplier_SL = 1.0
-    ATR_multiplier_TP = 1.5
-    MIN_SL_PIPS = 5     # minimum SL for scalping
-    MAX_SL_PIPS = 20    # maximum SL to avoid oversized SL
+    ATR_multiplier = 1.2
+    TPSL_ratio = 1.5
 
-    last_trade_time = None  # prevent repeated trades per candle
+    last_trade_time = None  # to prevent repeated trades per candle
 
     while True:
         now = datetime.now(timezone.utc)
-        next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        next_minute = (now + timedelta(minutes=1)).replace(second=0,
+                                                           microsecond=0)
         time.sleep(max(0, (next_minute - now).total_seconds()))
 
         try:
             candles = get_candles(symbol, count=500)
             df = candles_to_df(candles)
             df = df[df['complete']]
-
             if len(df) < backcandles:
                 continue
 
-            df['Open'], df['High'], df['Low'], df['Close'], df['Volume'] = \
-                df['mid_o'], df['mid_h'], df['mid_l'], df['mid_c'], df['volume']
+            df['Open'], df['High'], df['Low'], df['Close'], df['Volume'] = df[
+                'mid_o'], df['mid_h'], df['mid_l'], df['mid_c'], df['volume']
             df = df.sort_values('time')
             df.set_index('time', inplace=True)
-            
-            # Run strategy
-            df = strategy(df, backcandles, ATR_multiplier_SL)  # returns df with 'TotalSignal' & 'atr'
+
+            # Indicators
+            df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'],
+                                 df['Volume'])
+            df['RSI'] = ta.rsi(df['Close'], length=16)
+            bb = ta.bbands(df['Close'], length=14, std=2.0)
+            df = df.join(bb)
+            df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+            df.reset_index(inplace=True)
+
+            # VWAP signals
+            rolling_max = df['Close'].rolling(window=backcandles,
+                                              min_periods=1).max()
+            rolling_min = df['Close'].rolling(window=backcandles,
+                                              min_periods=1).min()
+            upt_condition = rolling_max >= df['VWAP']
+            dnt_condition = rolling_min <= df['VWAP']
+
+            VWAPsignal = np.zeros(len(df))
+            VWAPsignal[upt_condition & dnt_condition] = 3
+            VWAPsignal[upt_condition] = 2
+            VWAPsignal[dnt_condition] = 1
+            df['VWAPSignal'] = VWAPsignal
+
+            # Buy/Sell signals
+            condition_buy = (df['VWAPSignal'] == 2) & (
+                df['Close'] <= df['BBL_14_2.0']) & (df['RSI'] < 45)
+            condition_sell = (df['VWAPSignal'] == 1) & (
+                df['Close'] >= df['BBU_14_2.0']) & (df['RSI'] > 55)
+            df['TotalSignal'] = np.select([condition_buy, condition_sell],
+                                          [2, 1],
+                                          default=0)
 
             # Last candle
             last = df.iloc[-1]
             print(last)
             signal = last['TotalSignal']
-            atr = last['atr']
-
-            # Convert ATR to price distance
-            sl_distance = ATR_multiplier_SL * atr
-            tp_distance = ATR_multiplier_TP * atr
-
-            # Optional: enforce min/max pip limits
-            if "JPY" in symbol:
-                sl_distance = max(MIN_SL_PIPS*0.01, min(MAX_SL_PIPS*0.01, sl_distance))
-                tp_distance = max(MIN_SL_PIPS*0.01, tp_distance)  # only min limit for TP
-            else:
-                sl_distance = max(MIN_SL_PIPS*0.0001, min(MAX_SL_PIPS*0.0001, sl_distance))
-                tp_distance = max(MIN_SL_PIPS*0.0001, tp_distance)
+            slatr = ATR_multiplier * last['atr']
 
             if signal in [1, 2] and last_trade_time != last['time']:
                 if signal == 2:  # Buy
-                    sl_price = last['Close'] - sl_distance
-                    tp_price = last['Close'] + tp_distance
-                    place_order(units, 'buy', sl_price, tp_price, symbol)
-                    print(f"[{last['time']}] {symbol} BUY | SL:{sl_distance} TP:{tp_distance}")
+                    sl = last['Close'] - slatr
+                    tp = last['Close'] + slatr * TPSL_ratio
+                    place_order(units, 'buy', sl, tp, symbol)
+                    print(f"[{last['time']}] {symbol} BUY | SL:{sl} TP:{tp}")
 
                 elif signal == 1:  # Sell
-                    sl_price = last['Close'] + sl_distance
-                    tp_price = last['Close'] - tp_distance
-                    place_order(units, 'sell', sl_price, tp_price, symbol)
-                    print(f"[{last['time']}] {symbol} SELL | SL:{sl_distance} TP:{tp_distance}")
+                    sl = last['Close'] + slatr
+                    tp = last['Close'] - slatr * TPSL_ratio
+                    place_order(units, 'sell', sl, tp, symbol)
+                    print(f"[{last['time']}] {symbol} SELL | SL:{sl} TP:{tp}")
 
                 last_trade_time = last['time']
 
@@ -151,8 +171,10 @@ def run_symbol(symbol):
 
 
 # -----------------------------
-# 3️⃣ Run bot for multiple instruments
+# 3️⃣ Run script
 # -----------------------------
+import threading
+
 if __name__ == "__main__":
     symbols = [
         'TRY_JPY', 'HKD_JPY', 'USD_PLN', 'GBP_AUD', 'NZD_USD', 'EUR_ZAR',
@@ -170,8 +192,9 @@ if __name__ == "__main__":
     ]
 
     threads = []
+
     for sym in symbols:
-        t = threading.Thread(target=run_symbol, args=(sym,))
+        t = threading.Thread(target=run_symbol, args=(sym, ))
         t.start()
         threads.append(t)
 
