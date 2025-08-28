@@ -5,13 +5,78 @@ import numpy as np
 from datetime import datetime, timedelta, timezone
 from oandapyV20 import API
 from oandapyV20.endpoints import instruments, orders
-from oandapyV20.endpoints.accounts import AccountInstruments
 import warnings
 from dotenv import load_dotenv
 import traceback
 from strategies.vwap_rsi_scalping import strategy  # Your custom strategy function
 import threading
-from utils.utils import get_candles, candles_to_df, place_order, load_precisions, format_price, instrument_precisions, account_id
+
+# -----------------------------
+# 0️⃣ Setup
+# -----------------------------
+load_dotenv()
+account_id = os.getenv('OANDA_ACCOUNT_ID')
+access_key = os.getenv('OANDA_ACCESS_KEY')
+api = API(access_token=access_key)
+warnings.filterwarnings("ignore")
+
+
+# -----------------------------
+# 1️⃣ Helper functions
+# -----------------------------
+def get_candles(symbol: str, count: int = 20, granularity: str = 'M1'):
+    params = {"count": count, "granularity": granularity, "price": "MBA"}
+    r = instruments.InstrumentsCandles(instrument=symbol, params=params)
+    response = api.request(r)
+    return response['candles']
+
+
+def candles_to_df(candles):
+    records = []
+    for c in candles:
+        records.append({
+            "time": pd.to_datetime(c["time"]),
+            "complete": c["complete"],
+            "volume": c["volume"],
+            "mid_o": float(c["mid"]["o"]),
+            "mid_h": float(c["mid"]["h"]),
+            "mid_l": float(c["mid"]["l"]),
+            "mid_c": float(c["mid"]["c"]),
+            "bid_o": float(c["bid"]["o"]),
+            "bid_h": float(c["bid"]["h"]),
+            "bid_l": float(c["bid"]["l"]),
+            "bid_c": float(c["bid"]["c"]),
+            "ask_o": float(c["ask"]["o"]),
+            "ask_h": float(c["ask"]["h"]),
+            "ask_l": float(c["ask"]["l"]),
+            "ask_c": float(c["ask"]["c"]),
+        })
+    return pd.DataFrame(records)
+
+
+def format_price(price, instrument):
+    # JPY pairs → 3 decimals, others → 5 decimals
+    if "JPY" in instrument:
+        return str(round(price, 3))
+    else:
+        return str(round(price, 5))
+
+
+def place_order(units: int, side: str, sl_price: float, tp_price: float, symbol: str):
+    data = {
+        "order": {
+            "instrument": symbol,
+            "units": str(units if side == "buy" else -units),
+            "type": "MARKET",
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {"price": format_price(sl_price, symbol)},
+            "takeProfitOnFill": {"price": format_price(tp_price, symbol)}
+        }
+    }
+    r = orders.OrderCreate(accountID=account_id, data=data)
+    response = api.request(r)
+    print(f"[{datetime.now(timezone.utc)}] Order placed: {response}")
+
 
 # -----------------------------
 # 2️⃣ Main trading loop
@@ -21,7 +86,10 @@ def run_symbol(symbol):
     units = 1000
     ATR_multiplier_SL = 1.0
     ATR_multiplier_TP = 1.5
-    last_trade_time = None  
+    MIN_SL_PIPS = 5     # minimum SL for scalping
+    MAX_SL_PIPS = 20    # maximum SL to avoid oversized SL
+
+    last_trade_time = None  # prevent repeated trades per candle
 
     while True:
         now = datetime.now(timezone.utc)
@@ -54,32 +122,30 @@ def run_symbol(symbol):
             sl_distance = ATR_multiplier_SL * atr
             tp_distance = ATR_multiplier_TP * atr
 
-            if signal in [1, 2] and last_trade_time != last.name:
+            if signal in [1, 2] and last_trade_time != last['time']:
                 if signal == 2:  # Buy
                     sl_price = last['Close'] - sl_distance
                     tp_price = last['Close'] + tp_distance
                     place_order(units, 'buy', sl_price, tp_price, symbol)
-                    print(f"[{last.name}] {symbol} BUY | SL:{sl_distance} TP:{tp_distance}")
+                    print(f"[{last['time']}] {symbol} BUY | SL:{sl_distance} TP:{tp_distance}")
 
                 elif signal == 1:  # Sell
                     sl_price = last['Close'] + sl_distance
                     tp_price = last['Close'] - tp_distance
                     place_order(units, 'sell', sl_price, tp_price, symbol)
-                    print(f"[{last.name}] {symbol} SELL | SL:{sl_distance} TP:{tp_distance}")
+                    print(f"[{last['time']}] {symbol} SELL | SL:{sl_distance} TP:{tp_distance}")
 
-                last_trade_time = last.name
+                last_trade_time = last['time']
 
         except Exception as e:
             print(f"[{datetime.now()}] Error for {symbol}: {e}")
             traceback.print_exc()
 
+
 # -----------------------------
 # 3️⃣ Run bot for multiple instruments
 # -----------------------------
 if __name__ == "__main__":
-    # Load instrument precisions once
-    load_precisions(account_id)
-
     symbols = [
         'TRY_JPY', 'HKD_JPY', 'USD_PLN', 'GBP_AUD', 'NZD_USD', 'EUR_ZAR',
         'AUD_JPY', 'USD_NOK', 'CAD_CHF', 'GBP_SGD', 'USD_SEK', 'NZD_SGD',
