@@ -9,9 +9,10 @@ from oandapyV20.endpoints.accounts import AccountInstruments
 import warnings
 from dotenv import load_dotenv
 import traceback
+from strategies.mean_reversion_scalping import mean_reversion_scalping  # Your custom strategy function
 import threading
-from strategies.mean_reversion_scalping import mean_reversion_scalping
 from utils.mean_utils import get_candles, candles_to_df, place_order, load_precisions, format_price, instrument_precisions, account_id
+
 # -----------------------------
 # 2️⃣ Main trading loop
 # -----------------------------
@@ -24,11 +25,11 @@ def run_symbol(symbol):
 
     while True:
         now = datetime.now(timezone.utc)
-        next_minute = (now + timedelta(minutes=5)).replace(second=0, microsecond=0)
+        next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
         time.sleep(max(0, (next_minute - now).total_seconds()))
 
         try:
-            candles = get_candles(symbol, count=500, granularity='M5')
+            candles = get_candles(symbol, count=500)
             df = candles_to_df(candles)
             df = df[df['complete']]
 

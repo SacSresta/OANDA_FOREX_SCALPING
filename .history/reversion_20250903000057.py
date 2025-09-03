@@ -9,9 +9,10 @@ from oandapyV20.endpoints.accounts import AccountInstruments
 import warnings
 from dotenv import load_dotenv
 import traceback
+from strategies.mean_reversion_scalping import mean_reversion_scalping  # Your custom strategy function
 import threading
-from strategies.mean_reversion_scalping import mean_reversion_scalping
 from utils.mean_utils import get_candles, candles_to_df, place_order, load_precisions, format_price, instrument_precisions, account_id
+
 # -----------------------------
 # 2️⃣ Main trading loop
 # -----------------------------

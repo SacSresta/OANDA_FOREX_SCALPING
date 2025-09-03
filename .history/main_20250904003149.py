@@ -24,11 +24,11 @@ def run_symbol(symbol):
 
     while True:
         now = datetime.now(timezone.utc)
-        next_minute = (now + timedelta(minutes=5)).replace(second=0, microsecond=0)
+        next_minute = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
         time.sleep(max(0, (next_minute - now).total_seconds()))
 
         try:
-            candles = get_candles(symbol, count=500, granularity='M5')
+            candles = get_candles(symbol, count=500)
             df = candles_to_df(candles)
             df = df[df['complete']]
 
